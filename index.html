@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Trading Journal Dashboard</title>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>Trading Journal</h1>
+<div class="subtitle">Auto refresh every 30 seconds</div>
+
+<div id="content">Loading...</div>
+
+<script>
+
+function fetchGoogleLink() {
+    fetch("tradejourno.txt")
+        .then(res => res.text())
+        .then(link => fetchData(link.trim()))
+        .catch(err => {
+            document.getElementById("content").innerHTML =
+                "<div class='card'>Error loading tradejourno.txt: " + err + "</div>";
+        });
+}
+
+function fetchData(sheetURL) {
+    fetch(sheetURL)
+        .then(res => res.text())
+        .then(csv => processCSV(csv))
+        .catch(err => {
+            document.getElementById("content").innerHTML =
+                "<div class='card'>Error loading Google Sheet: " + err + "</div>";
+        });
+}
+
+function processCSV(csv) {
+
+    const rows = csv.trim().split(/\r?\n/);
+    const headers = rows[0].split(/,|\t/).map(h => h.trim());
+
+    const getIndex = name => headers.findIndex(h => h.toUpperCase() === name.toUpperCase());
+
+    const idxDate = getIndex("Date");
+    const idxUnderlying = getIndex("Underlying");
+    const idxStrike = getIndex("Strike");
+    const idxType = getIndex("Type");
+    const idxExpiry = getIndex("Expiry");
+    const idxAction = getIndex("Action");
+    const idxQty = getIndex("Qty");
+    const idxPrice = getIndex("Price");
+
+    const trades = [];
+
+    rows.slice(1).forEach(row => {
+
+        const cols = row.split(/,|\t/);
+        if(cols.length < headers.length) return;
+
+        trades.push({
+            date: cols[idxDate].trim(),
+            underlying: cols[idxUnderlying].trim().toUpperCase(),
+            strike: cols[idxStrike].trim(),
+            type: cols[idxType].trim().toUpperCase(),
+            expiry: cols[idxExpiry].trim(),
+            action: cols[idxAction].trim().toUpperCase(),
+            qty: parseInt(cols[idxQty]),
+            price: parseFloat(cols[idxPrice])
+        });
+    });
+
+    const closedTrades = buildPositionEngine(trades);
+    renderTables(closedTrades);
+}
+
+function buildPositionEngine(trades) {
+
+    const positions = {};
+    const closedTrades = [];
+
+    trades.forEach(trade => {
+
+        const key = trade.underlying + "_" +
+                    trade.strike + "_" +
+                    trade.type + "_" +
+                    trade.expiry;
+
+        if(!positions[key]) {
+            positions[key] = {
+                qty: 0,
+                side: null,
+                entryPrice: 0,
+                entryDate: null
+            };
+        }
+
+        let pos = positions[key];
+
+        if(pos.qty === 0) {
+            pos.qty = trade.qty;
+            pos.side = trade.action === "BUY" ? "LONG" : "SHORT";
+            pos.entryPrice = trade.price;
+            pos.entryDate = trade.date;
+            return;
+        }
+
+        if((pos.side === "LONG" && trade.action === "BUY") ||
+           (pos.side === "SHORT" && trade.action === "SELL")) {
+
+            pos.qty += trade.qty;
+            return;
+        }
+
+        pos.qty -= trade.qty;
+
+        if(pos.qty <= 0) {
+
+            const pnl = pos.side === "LONG"
+                ? (trade.price - pos.entryPrice) * trade.qty
+                : (pos.entryPrice - trade.price) * trade.qty;
+
+            closedTrades.push({
+                underlying: trade.underlying,
+                strike: trade.strike,
+                type: trade.type,
+                expiry: trade.expiry,
+                side: pos.side,
+                entryDate: pos.entryDate,
+                exitDate: trade.date,
+                qty: trade.qty,
+                entryPrice: pos.entryPrice,
+                exitPrice: trade.price,
+                pnl: pnl
+            });
+
+            pos.qty = 0;
+        }
+    });
+
+    return closedTrades;
+}
+
+function renderTables(trades) {
+
+    let grouped = {};
+    let grandTotal = 0;
+
+    trades.forEach(t => {
+
+        if(!grouped[t.underlying]) {
+            grouped[t.underlying] = { LONG: [], SHORT: [], total: 0 };
+        }
+
+        grouped[t.underlying][t.side].push(t);
+        grouped[t.underlying].total += t.pnl;
+        grandTotal += t.pnl;
+    });
+
+    let html = `
+        <div class="card">
+            <div class="section-title">Overall Performance</div>
+            <div class="summary-value ${grandTotal >= 0 ? 'profit':'loss'}">
+                ₹ ${grandTotal.toFixed(2)}
+            </div>
+        </div>
+    `;
+
+    for(const underlying in grouped) {
+
+        const underlyingTotal = grouped[underlying].total;
+
+        html += `<div class="card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px;">
+                        <div class="underlying-title">${underlying}</div>
+                        <div style="text-align: right;">
+                            <div style="font-weight: 400; font-size: 9px; color: #999; letter-spacing: 0.4px; text-transform: uppercase; margin-bottom: 2px;">Total P&L</div>
+                            <div class="summary-value ${underlyingTotal >= 0 ? 'profit':'loss'}">
+                                ₹ ${underlyingTotal.toFixed(2)}
+                            </div>
+                        </div>
+                    </div>`;
+
+        ["LONG","SHORT"].forEach(side => {
+
+            html += `<div class="side-title">${side} Trades</div>`;
+
+            html += `
+            <table>
+                <thead>
+                    <tr>
+                        <th>Underlying</th>
+                        <th>Strike</th>
+                        <th>Type</th>
+                        <th>Expiry</th>
+                        <th>Entry Date</th>
+                        <th>Exit Date</th>
+                        <th>Qty</th>
+                        <th>Entry</th>
+                        <th>Exit</th>
+                        <th>P&L</th>
+                    </tr>
+                </thead>
+                <tbody>
+            `;
+
+            grouped[underlying][side].forEach(t => {
+
+                html += `
+                <tr>
+                    <td>${t.underlying}</td>
+                    <td>${t.strike}</td>
+                    <td>${t.type}</td>
+                    <td>${t.expiry}</td>
+                    <td>${t.entryDate}</td>
+                    <td>${t.exitDate}</td>
+                    <td>${t.qty}</td>
+                    <td>${t.entryPrice}</td>
+                    <td>${t.exitPrice}</td>
+                    <td class="${t.pnl >= 0 ? 'profit':'loss'}">
+                        ₹ ${t.pnl.toFixed(2)}
+                    </td>
+                </tr>
+                `;
+            });
+
+            html += `</tbody></table>`;
+        });
+
+        html += `</div>`;
+    }
+
+    document.getElementById("content").innerHTML = html;
+}
+
+fetchGoogleLink();
+setInterval(fetchGoogleLink, 30000);
+
+</script>
+
+</body>
+</html>
