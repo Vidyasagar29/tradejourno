@@ -50,12 +50,23 @@ function processCSV(csv) {
     const idxQty = getIndex("Qty");
     const idxPrice = getIndex("Price");
 
+    const requiredIndexes = [idxDate, idxUnderlying, idxStrike, idxType, idxExpiry, idxAction, idxQty, idxPrice];
+    if (requiredIndexes.some(idx => idx === -1)) {
+        document.getElementById("content").innerHTML =
+            "<div class='card'>Missing required columns. Required: Date, Underlying, Strike, Type, Expiry, Action, Qty, Price.</div>";
+        return;
+    }
+
     const trades = [];
 
     rows.slice(1).forEach(row => {
 
         const cols = row.split(/,|\t/);
-        if(cols.length < headers.length) return;
+        if (cols.length < headers.length) return;
+
+        const qty = parseInt(cols[idxQty], 10);
+        const price = parseFloat(cols[idxPrice]);
+        if (!Number.isFinite(qty) || !Number.isFinite(price) || qty <= 0) return;
 
         trades.push({
             date: cols[idxDate].trim(),
@@ -64,13 +75,13 @@ function processCSV(csv) {
             type: cols[idxType].trim().toUpperCase(),
             expiry: cols[idxExpiry].trim(),
             action: cols[idxAction].trim().toUpperCase(),
-            qty: parseInt(cols[idxQty]),
-            price: parseFloat(cols[idxPrice])
+            qty: qty,
+            price: price
         });
     });
 
-    const closedTrades = buildPositionEngine(trades);
-    renderTables(closedTrades);
+    const engineResult = buildPositionEngine(trades);
+    renderTables(engineResult.closedTrades, engineResult.openPositions);
 }
 
 function buildPositionEngine(trades) {
@@ -85,70 +96,86 @@ function buildPositionEngine(trades) {
                     trade.type + "_" +
                     trade.expiry;
 
-        if(!positions[key]) {
+        if (!positions[key]) {
             positions[key] = {
-                qty: 0,
-                side: null,
-                entryPrice: 0,
-                entryDate: null
-            };
-        }
-
-        let pos = positions[key];
-
-        if(pos.qty === 0) {
-            pos.qty = trade.qty;
-            pos.side = trade.action === "BUY" ? "LONG" : "SHORT";
-            pos.entryPrice = trade.price;
-            pos.entryDate = trade.date;
-            return;
-        }
-
-        if((pos.side === "LONG" && trade.action === "BUY") ||
-           (pos.side === "SHORT" && trade.action === "SELL")) {
-
-            pos.qty += trade.qty;
-            return;
-        }
-
-        pos.qty -= trade.qty;
-
-        if(pos.qty <= 0) {
-
-            const pnl = pos.side === "LONG"
-                ? (trade.price - pos.entryPrice) * trade.qty
-                : (pos.entryPrice - trade.price) * trade.qty;
-
-            closedTrades.push({
                 underlying: trade.underlying,
                 strike: trade.strike,
                 type: trade.type,
                 expiry: trade.expiry,
-                side: pos.side,
-                entryDate: pos.entryDate,
-                exitDate: trade.date,
-                qty: trade.qty,
-                entryPrice: pos.entryPrice,
-                exitPrice: trade.price,
-                pnl: pnl
-            });
+                qty: 0,
+                side: null,
+                avgEntryPrice: 0,
+                entryDate: null
+            };
+        }
 
-            pos.qty = 0;
+        const pos = positions[key];
+        const tradeSide = trade.action === "BUY" ? "LONG" : "SHORT";
+
+        if (pos.qty === 0) {
+            pos.qty = trade.qty;
+            pos.side = tradeSide;
+            pos.avgEntryPrice = trade.price;
+            pos.entryDate = trade.date;
+            return;
+        }
+
+        if (pos.side === tradeSide) {
+            const totalCost = (pos.avgEntryPrice * pos.qty) + (trade.price * trade.qty);
+            pos.qty += trade.qty;
+            pos.avgEntryPrice = totalCost / pos.qty;
+            return;
+        }
+
+        const closingQty = Math.min(pos.qty, trade.qty);
+        const pnl = pos.side === "LONG"
+            ? (trade.price - pos.avgEntryPrice) * closingQty
+            : (pos.avgEntryPrice - trade.price) * closingQty;
+
+        closedTrades.push({
+            underlying: trade.underlying,
+            strike: trade.strike,
+            type: trade.type,
+            expiry: trade.expiry,
+            side: pos.side,
+            entryDate: pos.entryDate,
+            exitDate: trade.date,
+            qty: closingQty,
+            entryPrice: pos.avgEntryPrice,
+            exitPrice: trade.price,
+            pnl: pnl
+        });
+
+        pos.qty -= closingQty;
+
+        const remainingQty = trade.qty - closingQty;
+        if (pos.qty === 0) {
+            if (remainingQty > 0) {
+                pos.qty = remainingQty;
+                pos.side = tradeSide;
+                pos.avgEntryPrice = trade.price;
+                pos.entryDate = trade.date;
+            } else {
+                pos.side = null;
+                pos.avgEntryPrice = 0;
+                pos.entryDate = null;
+            }
         }
     });
 
-    return closedTrades;
+    const openPositions = Object.values(positions).filter(p => p.qty > 0);
+    return { closedTrades, openPositions };
 }
 
-function renderTables(trades) {
+function renderTables(trades, openPositions) {
 
-    let grouped = {};
+    const grouped = {};
     let grandTotal = 0;
 
     trades.forEach(t => {
 
-        if(!grouped[t.underlying]) {
-            grouped[t.underlying] = { LONG: [], SHORT: [], total: 0 };
+        if (!grouped[t.underlying]) {
+            grouped[t.underlying] = { LONG: [], SHORT: [], total: 0, open: [] };
         }
 
         grouped[t.underlying][t.side].push(t);
@@ -156,16 +183,29 @@ function renderTables(trades) {
         grandTotal += t.pnl;
     });
 
+    openPositions.forEach(p => {
+        if (!grouped[p.underlying]) {
+            grouped[p.underlying] = { LONG: [], SHORT: [], total: 0, open: [] };
+        }
+        grouped[p.underlying].open.push(p);
+    });
+
     let html = `
         <div class="card">
-            <div class="section-title">Overall Performance</div>
+            <div class="section-title">Overall Realized Performance</div>
             <div class="summary-value ${grandTotal >= 0 ? 'profit':'loss'}">
-                ₹ ${grandTotal.toFixed(2)}
+                Rs ${grandTotal.toFixed(2)}
             </div>
         </div>
     `;
 
-    for(const underlying in grouped) {
+    const underlyings = Object.keys(grouped);
+    if (underlyings.length === 0) {
+        document.getElementById("content").innerHTML = "<div class='card'>No valid trades found.</div>";
+        return;
+    }
+
+    underlyings.forEach(underlying => {
 
         const underlyingTotal = grouped[underlying].total;
 
@@ -173,16 +213,16 @@ function renderTables(trades) {
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; flex-wrap: wrap; gap: 10px;">
                         <div class="underlying-title">${underlying}</div>
                         <div style="text-align: right;">
-                            <div style="font-weight: 400; font-size: 9px; color: #999; letter-spacing: 0.4px; text-transform: uppercase; margin-bottom: 2px;">Total P&L</div>
+                            <div style="font-weight: 400; font-size: 9px; color: #999; letter-spacing: 0.4px; text-transform: uppercase; margin-bottom: 2px;">Realized P&L</div>
                             <div class="summary-value ${underlyingTotal >= 0 ? 'profit':'loss'}">
-                                ₹ ${underlyingTotal.toFixed(2)}
+                                Rs ${underlyingTotal.toFixed(2)}
                             </div>
                         </div>
                     </div>`;
 
-        ["LONG","SHORT"].forEach(side => {
+        ["LONG", "SHORT"].forEach(side => {
 
-            html += `<div class="side-title">${side} Trades</div>`;
+            html += `<div class="side-title">${side} Closed Trades</div>`;
 
             html += `
             <table>
@@ -203,31 +243,69 @@ function renderTables(trades) {
                 <tbody>
             `;
 
-            grouped[underlying][side].forEach(t => {
-
-                html += `
-                <tr>
-                    <td>${t.underlying}</td>
-                    <td>${t.strike}</td>
-                    <td>${t.type}</td>
-                    <td>${t.expiry}</td>
-                    <td>${t.entryDate}</td>
-                    <td>${t.exitDate}</td>
-                    <td>${t.qty}</td>
-                    <td>${t.entryPrice}</td>
-                    <td>${t.exitPrice}</td>
-                    <td class="${t.pnl >= 0 ? 'profit':'loss'}">
-                        ₹ ${t.pnl.toFixed(2)}
-                    </td>
-                </tr>
-                `;
-            });
+            if (grouped[underlying][side].length === 0) {
+                html += `<tr><td colspan="10">No closed ${side.toLowerCase()} trades yet.</td></tr>`;
+            } else {
+                grouped[underlying][side].forEach(t => {
+                    html += `
+                    <tr>
+                        <td>${t.underlying}</td>
+                        <td>${t.strike}</td>
+                        <td>${t.type}</td>
+                        <td>${t.expiry}</td>
+                        <td>${t.entryDate}</td>
+                        <td>${t.exitDate}</td>
+                        <td>${t.qty}</td>
+                        <td>${t.entryPrice.toFixed(2)}</td>
+                        <td>${t.exitPrice.toFixed(2)}</td>
+                        <td class="${t.pnl >= 0 ? 'profit':'loss'}">
+                            ${t.pnl.toFixed(2)}
+                        </td>
+                    </tr>
+                    `;
+                });
+            }
 
             html += `</tbody></table>`;
         });
 
-        html += `</div>`;
-    }
+        html += `<div class="side-title">Open Positions</div>
+                 <table>
+                    <thead>
+                        <tr>
+                            <th>Underlying</th>
+                            <th>Strike</th>
+                            <th>Type</th>
+                            <th>Expiry</th>
+                            <th>Side</th>
+                            <th>Open Qty</th>
+                            <th>Avg Entry</th>
+                            <th>Entry Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>`;
+
+        if (grouped[underlying].open.length === 0) {
+            html += `<tr><td colspan="8">No open positions.</td></tr>`;
+        } else {
+            grouped[underlying].open.forEach(p => {
+                html += `
+                <tr>
+                    <td>${p.underlying}</td>
+                    <td>${p.strike}</td>
+                    <td>${p.type}</td>
+                    <td>${p.expiry}</td>
+                    <td>${p.side}</td>
+                    <td>${p.qty}</td>
+                    <td>${p.avgEntryPrice.toFixed(2)}</td>
+                    <td>${p.entryDate}</td>
+                </tr>
+                `;
+            });
+        }
+
+        html += `</tbody></table></div>`;
+    });
 
     document.getElementById("content").innerHTML = html;
 }
@@ -239,3 +317,4 @@ setInterval(fetchGoogleLink, 30000);
 
 </body>
 </html>
+
