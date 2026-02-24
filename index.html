@@ -10,9 +10,49 @@
 <h1>Trading Journal</h1>
 <div class="subtitle">Auto refresh every 30 seconds</div>
 
+<div class="card" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+    <label for="symbolFilter" style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: #555;">Symbol Filter</label>
+    <select id="symbolFilter" style="padding: 6px 10px; border: 1px solid #ddd; background: #fff;">
+        <option value="ALL">All Symbols</option>
+    </select>
+</div>
+
 <div id="content">Loading...</div>
 
 <script>
+let selectedUnderlying = "ALL";
+let latestEngineResult = { closedTrades: [], openPositions: [] };
+
+function updateSymbolFilter(underlyings) {
+    const select = document.getElementById("symbolFilter");
+    const uniqueSorted = Array.from(new Set(underlyings)).sort();
+    const prevSelection = selectedUnderlying;
+
+    let options = '<option value="ALL">All Symbols</option>';
+    uniqueSorted.forEach(sym => {
+        options += `<option value="${sym}">${sym}</option>`;
+    });
+    select.innerHTML = options;
+
+    if (prevSelection !== "ALL" && uniqueSorted.includes(prevSelection)) {
+        selectedUnderlying = prevSelection;
+    } else {
+        selectedUnderlying = "ALL";
+    }
+    select.value = selectedUnderlying;
+}
+
+function renderWithFilter() {
+    const filteredClosed = selectedUnderlying === "ALL"
+        ? latestEngineResult.closedTrades
+        : latestEngineResult.closedTrades.filter(t => t.underlying === selectedUnderlying);
+
+    const filteredOpen = selectedUnderlying === "ALL"
+        ? latestEngineResult.openPositions
+        : latestEngineResult.openPositions.filter(p => p.underlying === selectedUnderlying);
+
+    renderTables(filteredClosed, filteredOpen);
+}
 
 function fetchGoogleLink() {
     fetch("tradejourno.txt")
@@ -80,8 +120,9 @@ function processCSV(csv) {
         });
     });
 
-    const engineResult = buildPositionEngine(trades);
-    renderTables(engineResult.closedTrades, engineResult.openPositions);
+    latestEngineResult = buildPositionEngine(trades);
+    updateSymbolFilter(trades.map(t => t.underlying));
+    renderWithFilter();
 }
 
 function buildPositionEngine(trades) {
@@ -175,19 +216,28 @@ function renderTables(trades, openPositions) {
     trades.forEach(t => {
 
         if (!grouped[t.underlying]) {
-            grouped[t.underlying] = { LONG: [], SHORT: [], total: 0, open: [] };
+            grouped[t.underlying] = {
+                LONG: { CE: [], PE: [] },
+                SHORT: { CE: [], PE: [] },
+                total: 0,
+                open: { CE: [], PE: [] }
+            };
         }
 
-        grouped[t.underlying][t.side].push(t);
+        if (!grouped[t.underlying][t.side][t.type]) grouped[t.underlying][t.side][t.type] = [];
+        grouped[t.underlying][t.side][t.type].push(t);
         grouped[t.underlying].total += t.pnl;
         grandTotal += t.pnl;
     });
 
     openPositions.forEach(p => {
         if (!grouped[p.underlying]) {
-            grouped[p.underlying] = { LONG: [], SHORT: [], total: 0, open: [] };
+            grouped[p.underlying] = {
+                LONG: { CE: [], PE: [] },
+                SHORT: { CE: [], PE: [] },
+                total: 0
+            };
         }
-        grouped[p.underlying].open.push(p);
     });
 
     let html = `
@@ -200,8 +250,56 @@ function renderTables(trades, openPositions) {
     `;
 
     const underlyings = Object.keys(grouped);
+
+    html += `<div class="card"><div class="side-title">Open Positions (All Symbols)</div>`;
+
+    ["CE", "PE"].forEach(optType => {
+        const typeLabel = optType === "CE" ? "Calls" : "Puts";
+        const typeOpen = openPositions.filter(p => p.type === optType);
+
+        html += `<div class="side-title">${typeLabel}</div>
+                 <table>
+                    <thead>
+                        <tr>
+                            <th>Underlying</th>
+                            <th>Strike</th>
+                            <th>Type</th>
+                            <th>Expiry</th>
+                            <th>Side</th>
+                            <th>Open Qty</th>
+                            <th>Avg Entry</th>
+                            <th>Entry Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>`;
+
+        if (typeOpen.length === 0) {
+            html += `<tr><td colspan="8">No open ${typeLabel.toLowerCase()}.</td></tr>`;
+        } else {
+            typeOpen.forEach(p => {
+                html += `
+                <tr>
+                    <td>${p.underlying}</td>
+                    <td>${p.strike}</td>
+                    <td>${p.type}</td>
+                    <td>${p.expiry}</td>
+                    <td>${p.side}</td>
+                    <td>${p.qty}</td>
+                    <td>${p.avgEntryPrice.toFixed(2)}</td>
+                    <td>${p.entryDate}</td>
+                </tr>
+                `;
+            });
+        }
+
+        html += `</tbody></table>`;
+    });
+
+    html += `</div>`;
+
     if (underlyings.length === 0) {
-        document.getElementById("content").innerHTML = "<div class='card'>No valid trades found.</div>";
+        html += `<div class="card"><div class="side-title">No closed trades yet.</div></div>`;
+        document.getElementById("content").innerHTML = html;
         return;
     }
 
@@ -224,87 +322,58 @@ function renderTables(trades, openPositions) {
 
             html += `<div class="side-title">${side} Closed Trades</div>`;
 
-            html += `
-            <table>
-                <thead>
-                    <tr>
-                        <th>Underlying</th>
-                        <th>Strike</th>
-                        <th>Type</th>
-                        <th>Expiry</th>
-                        <th>Entry Date</th>
-                        <th>Exit Date</th>
-                        <th>Qty</th>
-                        <th>Entry</th>
-                        <th>Exit</th>
-                        <th>P&L</th>
-                    </tr>
-                </thead>
-                <tbody>
-            `;
+            ["CE", "PE"].forEach(optType => {
+                const typeLabel = optType === "CE" ? "Calls" : "Puts";
+                const typeTrades = grouped[underlying][side][optType] || [];
 
-            if (grouped[underlying][side].length === 0) {
-                html += `<tr><td colspan="10">No closed ${side.toLowerCase()} trades yet.</td></tr>`;
-            } else {
-                grouped[underlying][side].forEach(t => {
-                    html += `
-                    <tr>
-                        <td>${t.underlying}</td>
-                        <td>${t.strike}</td>
-                        <td>${t.type}</td>
-                        <td>${t.expiry}</td>
-                        <td>${t.entryDate}</td>
-                        <td>${t.exitDate}</td>
-                        <td>${t.qty}</td>
-                        <td>${t.entryPrice.toFixed(2)}</td>
-                        <td>${t.exitPrice.toFixed(2)}</td>
-                        <td class="${t.pnl >= 0 ? 'profit':'loss'}">
-                            ${t.pnl.toFixed(2)}
-                        </td>
-                    </tr>
-                    `;
-                });
-            }
-
-            html += `</tbody></table>`;
-        });
-
-        html += `<div class="side-title">Open Positions</div>
-                 <table>
+                html += `<div class="side-title">${typeLabel}</div>`;
+                html += `
+                <table>
                     <thead>
                         <tr>
                             <th>Underlying</th>
                             <th>Strike</th>
                             <th>Type</th>
                             <th>Expiry</th>
-                            <th>Side</th>
-                            <th>Open Qty</th>
-                            <th>Avg Entry</th>
                             <th>Entry Date</th>
+                            <th>Exit Date</th>
+                            <th>Qty</th>
+                            <th>Entry</th>
+                            <th>Exit</th>
+                            <th>P&L</th>
                         </tr>
                     </thead>
-                    <tbody>`;
-
-        if (grouped[underlying].open.length === 0) {
-            html += `<tr><td colspan="8">No open positions.</td></tr>`;
-        } else {
-            grouped[underlying].open.forEach(p => {
-                html += `
-                <tr>
-                    <td>${p.underlying}</td>
-                    <td>${p.strike}</td>
-                    <td>${p.type}</td>
-                    <td>${p.expiry}</td>
-                    <td>${p.side}</td>
-                    <td>${p.qty}</td>
-                    <td>${p.avgEntryPrice.toFixed(2)}</td>
-                    <td>${p.entryDate}</td>
-                </tr>
+                    <tbody>
                 `;
-            });
-        }
 
-        html += `</tbody></table></div>`;
+                if (typeTrades.length === 0) {
+                    html += `<tr><td colspan="10">No closed ${side.toLowerCase()} ${typeLabel.toLowerCase()} yet.</td></tr>`;
+                } else {
+                    typeTrades.forEach(t => {
+                        html += `
+                        <tr>
+                            <td>${t.underlying}</td>
+                            <td>${t.strike}</td>
+                            <td>${t.type}</td>
+                            <td>${t.expiry}</td>
+                            <td>${t.entryDate}</td>
+                            <td>${t.exitDate}</td>
+                            <td>${t.qty}</td>
+                            <td>${t.entryPrice.toFixed(2)}</td>
+                            <td>${t.exitPrice.toFixed(2)}</td>
+                            <td class="${t.pnl >= 0 ? 'profit':'loss'}">
+                                ${t.pnl.toFixed(2)}
+                            </td>
+                        </tr>
+                        `;
+                    });
+                }
+
+                html += `</tbody></table>`;
+            });
+        });
+
+        html += `</div>`;
     });
 
     document.getElementById("content").innerHTML = html;
@@ -312,6 +381,10 @@ function renderTables(trades, openPositions) {
 
 fetchGoogleLink();
 setInterval(fetchGoogleLink, 30000);
+document.getElementById("symbolFilter").addEventListener("change", function() {
+    selectedUnderlying = this.value;
+    renderWithFilter();
+});
 
 </script>
 
